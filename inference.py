@@ -10,7 +10,7 @@ from model import ModelArgs, Transformer
 
 class LLaMA:
 
-    def __init__(self, model:Transformer, tokenizer:SentencePieceProcessor, model_args: ModelArgs) -> None:
+    def __init__(self, model:Transformer, tokenizer:SentencePieceProcessor, model_args: ModelArgs):
         self.model = model
         self.tokenizer = tokenizer
         self.args = model_args
@@ -42,7 +42,7 @@ class LLaMA:
         model_args.vocab_size = tokenizer.vocab_size()
 
         if device == 'cuda':
-            torch.set_default_tensor_type(torch.cuda.HalfTensor)
+            torch.set_default_tensor_type(torch.cuda.FloatTensor)
         
         else:
             torch.set_default_tensor_type(torch.BFloat16Tensor)
@@ -76,12 +76,13 @@ class LLaMA:
             # Populate the initial tokens with the prompt tokens
             tokens[k, :len(t)] = torch.tensor(t, dtype = torch.long, device = device)
 
-        eos_reached = torch.Tensor([False] * batch_size).to(device)
+        eos_reached = torch.Tensor([False] * batch_size, device = device)
         prompt_tokens_mask = tokens != pad_id # True if the token is a prompt token, False otherwise
-
+       
         for cur_pos in tqdm(range(1, total_len), desc= 'Generating tokens'):
             with torch.no_grad():
                 logits = self.model.forward(tokens[:, cur_pos-1:cur_pos], cur_pos)
+                
             if temperature > 0 :
                 # The temperature is applied before the softmax
                 probs = torch.softmax(logits[:, -1] / temperature, dim = -1)
@@ -96,7 +97,7 @@ class LLaMA:
             next_token = torch.where(prompt_tokens_mask[:, cur_pos], tokens[:, cur_pos], next_token)
             tokens[:, cur_pos] = next_token
             # EOS is reached only if we found an EOS token for a padding position
-            eos_reached = eos_reached | (~prompt_tokens_mask[:, cur_pos] & (next_token == self.tokenizer.eos_id()))
+            eos_reached = (~prompt_tokens_mask[:, cur_pos]) & (next_token == self.tokenizer.eos_id)
             if all(eos_reached):
                 break
 
@@ -112,12 +113,12 @@ class LLaMA:
         return (out_tokens, out_text)
     
     def _sample_top_p(self, probs, p):
-        # []
+        # (B, vocab_size)
         probs_sort, probs_idx = torch.sort(probs, dim = -1, descending = True) # sorted initially 
         probs_sum = torch.cumsum(probs_sort, dim = -1)
         mask = probs_sum - probs_sort > p
-        probs_sort[mask] = 0
-        probs_sort.div_(probs_sort.sum(div = -1, keepdim = True))
+        probs_sort[mask] = 0.0
+        probs_sort.div_(probs_sort.sum(dim = -1, keepdim = True))
         next_token = torch.multinomial(probs_sort, num_samples = 1)
         next_token = torch.gather(probs_idx, -1, next_token)
         return next_token
@@ -125,13 +126,26 @@ class LLaMA:
 
     
 if __name__ == '__main__':
-    torch.manual_seed(0)
+    torch.manual_seed(414)
 
-    allow_cuda = False
+    allow_cuda = True
     device = 'cuda' if torch.cuda.is_available() and allow_cuda else 'cpu'
 
     prompts = [
-        ""
+        "Simply put, the theory of relativity states that ",
+        "If Google was an Italian company founded in Milan, it would",
+        # Few shot prompt
+        """Translate English to French:
+
+        sea otter => loutre de mer
+        peppermint => menthe poivrée
+        plush giraffe => girafe peluche
+        cheese => """,
+        # Zero shot prompt
+        """Tell me if the following person is actually Doraemon disguised as human:
+        Name: Jimin Lee
+        Decision:
+        """
     ]
 
     model = LLaMA.build(
@@ -139,7 +153,7 @@ if __name__ == '__main__':
         tokenizer_path='tokenizer.model',
         load_model=True,
         max_seq_len=1024,
-        max_batch_size=3,
+        max_batch_size=4,
         device=device
     )
 
